@@ -126,8 +126,8 @@ server <- function(input, output, session) {
         `Bloque` = name,
         `Área Total (ha)` = area,
         `Área Efectiva (ha)` = area_efectiva,
-        `Cantidad Total (Numpoints)` = numpoints,
-        `Densidad (Plántulas/ha)` = densidad,
+        `Cantidad Total` = numpoints,
+        `Densidad (Plantas/ha)` = densidad,
         `Plantas Vivas` = viva,
         `Plantas Muertas` = muerta,
         `Plantas en Alerta` = alerta,
@@ -217,5 +217,6 @@ server <- function(input, output, session) {
     content = function(file) { write_xlsx(tabla_final_df(), file) }
   )
 }
+
 
 shinyApp(ui, server)
