@@ -1,7 +1,9 @@
 # ==============================================================================
 # 1. PREPARACIÓN Y LIBRERÍAS
 # ==============================================================================
-if (!require("rsconnect")) install.packages("rsconnect")
+pkg <- c("shiny", "leaflet", "sf", "plotly", "dplyr", "bslib", "DT", "writexl", "rsconnect")
+new_pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+if (length(new_pkg)) install.packages(new_pkg)
 
 library(shiny)
 library(leaflet)
@@ -10,8 +12,8 @@ library(plotly)
 library(dplyr)
 library(bslib)
 library(DT)
+library(writexl)
 
-# Generar manifiesto para Posit Connect (solo en modo local interactivo)
 if (interactive()) {
   rsconnect::writeManifest(appPrimaryDoc = "app.R")
 }
@@ -23,24 +25,14 @@ ui <- page_navbar(
   title = "Gestión Agrícola: Plantas",
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   
-  # Espaciador y Logo en la parte superior derecha
-  nav_spacer(),
-  nav_item(
-    tags$img(
-      src = "logo.jpg", 
-      height = "60px", 
-      style = "margin-right: 15px; margin-top: 5px;"
-    )
-  ),
-  
   nav_panel("Dashboard Operativo",
             layout_sidebar(
               sidebar = sidebar(
+                width = 350,
                 title = "Panel de Control",
-                # Selector de archivos dinámico desde la carpeta data/
                 selectInput("select_gpkg", "Seleccionar Archivo GPKG:", 
-                            choices = list.files("data/", pattern = "\\.gpkg$")),
-                # Este selector se genera en el server
+                            choices = list.files("data/", pattern = "\\.gpkg$"),
+                            width = "100%"),
                 uiOutput("ui_selector_bloque"),
                 hr(),
                 actionButton("zoom_btn", "Re-centrar Mapa", 
@@ -49,34 +41,53 @@ ui <- page_navbar(
               ),
               
               layout_columns(
-                col_widths = c(12, 7, 5),
-                row_heights = c("450px", "400px"),
-                
-                card(
-                  full_screen = TRUE,
-                  card_header("Distribución Espacial (Satélite)"),
-                  leafletOutput("mapa_plantas")
+                value_box(
+                  title = "Plantas Vivas",
+                  value = textOutput("txt_vivas"),
+                  showcase = icon("leaf"),
+                  theme = "success"
                 ),
-                
-                card(
-                  card_header("Estado de Plantas: Conteo por Bloque"),
-                  plotlyOutput("grafica_barras")
+                value_box(
+                  title = "Plantas Muertas",
+                  value = textOutput("txt_muertas"),
+                  showcase = icon("skull"),
+                  theme = "danger"
                 ),
-                
-                card(
-                  card_header("KPI: Porcentaje de Mortalidad"),
-                  plotlyOutput("grafica_gauge")
+                value_box(
+                  title = "Mortalidad Promedio",
+                  value = textOutput("txt_mort"),
+                  showcase = icon("percent"),
+                  theme = "warning"
                 )
+              ),
+              
+              layout_columns(
+                col_widths = c(12, 7, 5),
+                row_heights = c("500px", "400px"),
+                card(full_screen = TRUE, card_header("Distribución Espacial"), leafletOutput("mapa_plantas")),
+                card(card_header("Estado de Plantas"), plotlyOutput("grafica_barras")),
+                card(card_header("KPI Mortalidad"), plotlyOutput("grafica_gauge"))
               )
             )
   ),
   
   nav_panel("Datos Detallados",
             card(
-              card_header("Resumen de Inventario (Tabla de Atributos)"),
+              card_header(
+                div(style = "display: flex; justify-content: space-between; align-items: center;",
+                    "Resumen de Inventario",
+                    div(
+                      downloadButton("download_csv", "CSV", class = "btn-sm btn-outline-secondary"),
+                      downloadButton("download_excel", "Excel", class = "btn-sm btn-outline-success")
+                    )
+                )
+              ),
               DTOutput("tabla_maestra")
             )
-  )
+  ),
+  
+  nav_spacer(),
+  nav_item(tags$img(src = "logo.jpg", height = "60px", style = "margin-top: -5px;"))
 )
 
 # ==============================================================================
@@ -84,127 +95,93 @@ ui <- page_navbar(
 # ==============================================================================
 server <- function(input, output, session) {
   
-  # 3.1. Lectura reactiva de datos
+  # 3.1. Lectura de datos
   datos <- reactive({
     req(input$select_gpkg)
     ruta <- file.path("data", input$select_gpkg)
-    
-    # Validar que el archivo existe antes de leer
     if (!file.exists(ruta)) return(NULL)
-    
-    df <- st_read(ruta, quiet = TRUE) %>% 
-      st_transform(4326)
-    
-    # Normalizar nombres a minúsculas para evitar conflictos
+    df <- st_read(ruta, quiet = TRUE) %>% st_transform(4326)
     names(df) <- tolower(names(df))
     return(df)
   })
   
-  # 3.2. Generación dinámica del selector de bloques
-  output$ui_selector_bloque <- renderUI({
-    df <- datos()
-    req(df)
-    choices <- c("Todos", sort(unique(df$name)))
-    selectInput("bloque_filtro", "Filtrar por Bloque:", choices = choices, selected = "Todos")
-  })
-  
-  # 3.3. Mapa Base
-  output$mapa_plantas <- renderLeaflet({
-    leaflet() %>%
-      addProviderTiles(providers$Esri.WorldImagery) %>%
-      setView(lng = -83.5, lat = 10.2, zoom = 12)
-  })
-  
-  # 3.4. Actualización del Mapa (con validación de filtro)
-  observe({
+  datos_filtrados <- reactive({
     req(datos(), input$bloque_filtro)
     df <- datos()
-    
-    if (input$bloque_filtro != "Todos") {
-      df <- df %>% filter(name == input$bloque_filtro)
-    }
-    
-    req(nrow(df) > 0) # Asegurar que hay datos tras el filtro
-    
-    bbox <- st_bbox(df)
+    if (input$bloque_filtro != "Todos") df <- df %>% filter(name == input$bloque_filtro)
+    return(df)
+  })
+  
+  output$ui_selector_bloque <- renderUI({
+    req(datos())
+    selectInput("bloque_filtro", "Filtrar por Bloque:", choices = c("Todos", sort(unique(datos()$name))))
+  })
+  
+  # 3.2. Formateo de tabla para visualización y descarga
+  tabla_final_df <- reactive({
+    req(datos_filtrados())
+    datos_filtrados() %>%
+      st_drop_geometry() %>%
+      select(
+        `Bloque` = name,
+        `Área Total (ha)` = area,
+        `Área Efectiva (ha)` = area_efectiva,
+        `Cantidad Total` = numpoints,
+        `Densidad (Planas/ha)` = densidad,
+        `Plantas Vivas` = viva,
+        `Plantas Muertas` = muerta,
+        `Plantas en Alerta` = alerta,
+        `Porcentaje de Mortalidad` = perc_mort
+      )
+  })
+  
+  # 3.3. Indicadores y Gráficos
+  output$txt_vivas <- renderText({ format(sum(datos_filtrados()$viva, na.rm=T), big.mark=",") })
+  output$txt_muertas <- renderText({ format(sum(datos_filtrados()$muerta, na.rm=T), big.mark=",") })
+  output$txt_mort <- renderText({ paste0(round(mean(datos_filtrados()$perc_mort, na.rm=T), 2), "%") })
+  
+  output$mapa_plantas <- renderLeaflet({
+    leaflet() %>% addProviderTiles(providers$Esri.WorldImagery) %>% setView(lng = -83.5, lat = 10.2, zoom = 10)
+  })
+  
+  observe({
+    df <- datos_filtrados()
+    req(nrow(df) > 0)
     pal <- colorNumeric(palette = "YlOrRd", domain = datos()$perc_mort)
-    
     leafletProxy("mapa_plantas", data = df) %>%
       clearShapes() %>%
-      addPolygons(
-        fillColor = ~pal(perc_mort),
-        weight = 1.5, color = "white", fillOpacity = 0.7,
-        popup = ~paste0(
-          "<b>Bloque: </b>", name, "<br><hr>",
-          "<b>Plantas: </b>", numpoints, "<br>",
-          "<b>Mortalidad: </b>", round(perc_mort, 2), "%"
-        ),
-        highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE)
-      ) %>%
-      flyToBounds(bbox[["xmin"]], bbox[["ymin"]], bbox[["xmax"]], bbox[["ymax"]])
+      addPolygons(fillColor = ~pal(perc_mort), weight = 1.5, color = "white", fillOpacity = 0.7,
+                  popup = ~paste0("<b>", name, "</b><br>Mortalidad: ", round(perc_mort, 2), "%")) %>%
+      flyToBounds(st_bbox(df)[["xmin"]], st_bbox(df)[["ymin"]], st_bbox(df)[["xmax"]], st_bbox(df)[["ymax"]])
   })
   
-  # 3.5. Botón de Re-centrar
-  observeEvent(input$zoom_btn, {
-    req(datos())
-    bbox <- st_bbox(datos())
-    leafletProxy("mapa_plantas") %>% 
-      flyToBounds(bbox[["xmin"]], bbox[["ymin"]], bbox[["xmax"]], bbox[["ymax"]])
-  })
-  
-  # 3.6. Gráfica de Barras (Corregida)
   output$grafica_barras <- renderPlotly({
-    req(datos(), input$bloque_filtro)
-    df_plot <- as.data.frame(datos())
-    
-    if (input$bloque_filtro != "Todos") {
-      df_plot <- df_plot %>% filter(name == input$bloque_filtro)
-    }
-    
-    plot_ly(df_plot, x = ~name, y = ~viva, type = 'bar', name = 'Vivas', marker = list(color = '#2ecc71')) %>%
-      add_trace(y = ~muerta, name = 'Muertas', marker = list(color = '#e74c3c')) %>%
-      add_trace(y = ~alerta, name = 'Alertas', marker = list(color = '#f1c40f')) %>%
-      layout(yaxis = list(title = "Cantidad"), barmode = 'group', xaxis = list(title = "Bloque"))
+    plot_ly(tabla_final_df(), x = ~Bloque, y = ~`Plantas Vivas`, type = 'bar', name = 'Vivas', marker = list(color = '#2ecc71')) %>%
+      add_trace(y = ~`Plantas Muertas`, name = 'Muertas', marker = list(color = '#e74c3c')) %>%
+      layout(barmode = 'group')
   })
   
-  # 3.7. Gauge de Mortalidad (Corregida)
   output$grafica_gauge <- renderPlotly({
-    req(datos(), input$bloque_filtro)
-    df <- as.data.frame(datos())
-    
-    if (input$bloque_filtro == "Todos") {
-      val <- mean(df$perc_mort, na.rm = TRUE)
-    } else {
-      val <- df %>% filter(name == input$bloque_filtro) %>% pull(perc_mort)
-    }
-    
-    # Manejo de casos vacíos
-    if(length(val) == 0) val <- 0
-    
-    plot_ly(
-      type = "indicator", mode = "gauge+number", value = val,
-      gauge = list(
-        axis = list(range = list(NULL, 100), ticksuffix = "%"),
-        steps = list(
-          list(range = c(0, 15), color = "#d4edda"),
-          list(range = c(15, 30), color = "#fff3cd"),
-          list(range = c(30, 100), color = "#f8d7da")
-        ),
-        bar = list(color = "#2c3e50")
-      )
-    )
+    val <- mean(tabla_final_df()$`Porcentaje de Mortalidad`, na.rm = TRUE)
+    plot_ly(type = "indicator", mode = "gauge+number", value = val,
+            gauge = list(axis = list(range = list(NULL, 100)), bar = list(color = "#2c3e50")))
   })
   
-  # 3.8. Tabla Maestra
+  # 3.4. Tabla y Descargas
   output$tabla_maestra <- renderDT({
-    req(datos())
-    df_tabla <- st_drop_geometry(datos())
-    datatable(df_tabla, 
-              options = list(pageLength = 10, scrollX = TRUE,
-                             language = list(url = '//cdn.datatables.net/plug-ins/1.10.25/i18n/Spanish.json')), 
-              rownames = FALSE)
+    datatable(tabla_final_df(), options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE) %>%
+      formatRound(columns = c(2, 3, 5, 9), digits = 2)
   })
+  
+  output$download_csv <- downloadHandler(
+    filename = function() { paste0("Inventario_", input$select_gpkg, "_", Sys.Date(), ".csv") },
+    content = function(file) { write.csv(tabla_final_df(), file, row.names = FALSE) }
+  )
+  
+  output$download_excel <- downloadHandler(
+    filename = function() { paste0("Inventario_", input$select_gpkg, "_", Sys.Date(), ".xlsx") },
+    content = function(file) { write_xlsx(tabla_final_df(), file) }
+  )
 }
 
-# Lanzar Aplicación
 shinyApp(ui, server)
